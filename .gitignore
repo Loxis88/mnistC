@@ -1,3 +1,4 @@
 main
 /mnist
 *.jpg
+*.png

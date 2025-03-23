@@ -3,6 +3,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#include "stb_image_resize.h"
+
+
+#define TARGET_WIDTH 28
+#define TARGET_HEIGHT 28
+#define TARGET_SIZE (TARGET_WIDTH * TARGET_HEIGHT)
 
 #define LINE_LENGTH 785
 #define TRAIN_LENGTH 60000
@@ -10,12 +21,12 @@
 
 // Гиперпараметры нейронной сети
 #define NUM_LAYERS 2
-#define HIDDEN_LAYER_SIZE 128
+#define HIDDEN_LAYER_SIZE 64
 #define OUTPUT_LAYER_SIZE 10
 #define LEARNING_RATE 0.01  // Уменьшено для Adam
 #define EPOCHS 5                // Количество эпох обучения
 #define PROGRESS_INTERVAL 1000   // Интервал отображения прогресса
-#define BATCH_SIZE 32            // Размер батча для обучения
+#define BATCH_SIZE 16            // Размер батча для обучения
 
 // Параметры Adam оптимизатора
 #define ADAM_BETA1 0.9
@@ -495,10 +506,27 @@ double evaluate_accuracy(NeuralNetwork* network, int data[TEST_LENGTH][LINE_LENG
     return (double)correct / num_samples;
 }
 
+// Функция для перемешивания обучающих данных
+void shuffle_data(int data[TRAIN_LENGTH][LINE_LENGTH]) {
+    for (int i = TRAIN_LENGTH - 1; i > 0; i--) {
+        int j = rand() % (i + 1);
+        // Обмен местами строк i и j
+        for (int k = 0; k < LINE_LENGTH; k++) {
+            int temp = data[i][k];
+            data[i][k] = data[j][k];
+            data[j][k] = temp;
+        }
+    }
+}
+
 void importTrain(char*, int [TRAIN_LENGTH][LINE_LENGTH]);
 void importTest(char*, int [TEST_LENGTH][LINE_LENGTH]);
+int predict_image(NeuralNetwork* network, const char* image_path);
 
 int main() {
+    // Инициализация генератора случайных чисел
+    srand(time(NULL));
+
     int (*train)[LINE_LENGTH] = malloc(TRAIN_LENGTH * sizeof(*train));
     int (*test)[LINE_LENGTH] = malloc(TEST_LENGTH * sizeof(*test));
     if (!train || !test) { fprintf(stderr, "Memory allocation failed\n"); free(train); free(test); return 1; }
@@ -506,19 +534,28 @@ int main() {
     importTrain("mnist/mnist_train.csv", train);
     importTest("mnist/mnist_test.csv", test);
 
-    int layer_sizes[] = {HIDDEN_LAYER_SIZE, OUTPUT_LAYER_SIZE};
-    ActivationFunc activations[] = {lrelu, identity}; // identity для выходного слоя с softmax
-    ActivationDeriv derivs[] = {lrelu_deriv, identity_deriv};
+    int layer_sizes[] = {HIDDEN_LAYER_SIZE,HIDDEN_LAYER_SIZE, OUTPUT_LAYER_SIZE};
+    ActivationFunc activations[] = {lrelu,lrelu, identity}; // identity для выходного слоя с softmax
+    ActivationDeriv derivs[] = {lrelu_deriv,lrelu_deriv, identity_deriv};
     NeuralNetwork* network = create_network(layer_sizes, NUM_LAYERS, activations, derivs);
 
     printf("Начало обучения: %d эпох, %d примеров, размер батча: %d\n", EPOCHS, TRAIN_LENGTH, BATCH_SIZE);
+
+    // Переменные для раннего останова
+    double best_accuracy = 0.0;
+    int epochs_without_improvement = 0;
+    const int patience = 2; // Количество эпох без улучшения для early stopping
 
     // Обучение по эпохам
     for (int epoch = 0; epoch < EPOCHS; epoch++) {
         printf("Эпоха %d/%d\n", epoch + 1, EPOCHS);
 
-        // Перемешиваем обучающую выборку (опционально)
-        // shuffle_data(train, TRAIN_LENGTH);
+        // Перемешиваем обучающую выборку перед каждой эпохой
+        shuffle_data(train);
+
+        // Адаптивный learning rate
+        double current_lr = LEARNING_RATE / (1.0 + 0.05 * epoch);
+        printf("  Текущий learning rate: %.6f\n", current_lr);
 
         // Подготовка структур для хранения градиентов
         double*** weight_gradients = (double***)malloc(network->num_layers * sizeof(double**));
@@ -527,7 +564,6 @@ int main() {
         for (int l = 0; l < network->num_layers; l++) {
             bias_gradients[l] = (double*)calloc(network->layers[l]->num_neurons * BATCH_SIZE, sizeof(double));
             weight_gradients[l] = (double**)malloc(network->layers[l]->num_neurons * BATCH_SIZE * sizeof(double*));
-
             for (int i = 0; i < network->layers[l]->num_neurons * BATCH_SIZE; i++) {
                 weight_gradients[l][i] = (double*)calloc(network->layers[l]->num_inputs, sizeof(double));
             }
@@ -579,7 +615,7 @@ int main() {
             }
 
             // Обновляем веса после обработки всего батча
-            batch_update(network, weight_gradients, bias_gradients, LEARNING_RATE, current_batch_size);
+            batch_update(network, weight_gradients, bias_gradients, current_lr, current_batch_size);
 
             // Обнуляем градиенты для следующего батча
             for (int l = 0; l < network->num_layers; l++) {
@@ -612,6 +648,18 @@ int main() {
         // Оцениваем точность на тестовой выборке после каждой эпохи
         double accuracy = evaluate_accuracy(network, test, TEST_LENGTH);
         printf("  Точность на тестовых данных после эпохи %d: %.2f%%\n", epoch + 1, accuracy * 100);
+
+        // Проверка для early stopping
+        if (accuracy > best_accuracy) {
+            best_accuracy = accuracy;
+            epochs_without_improvement = 0;
+        } else {
+            epochs_without_improvement++;
+            if (epochs_without_improvement >= patience) {
+                printf("Early stopping: нет улучшения в течение %d эпох\n", patience);
+                break;
+            }
+        }
     }
 
     printf("Обучение завершено\n");
@@ -620,23 +668,50 @@ int main() {
     double final_accuracy = evaluate_accuracy(network, test, TEST_LENGTH);
     printf("Итоговая точность на тестовых данных: %.2f%%\n", final_accuracy * 100);
 
+    // Интерактивный режим предсказания по пользовательским изображениям
+    char choice;
+    printf("\nВы хотите проверить сеть на собственном изображении? (y/n): ");
+    scanf(" %c", &choice);
+
+    while (choice == 'y' || choice == 'Y') {
+        char image_path[256];
+        printf("Введите путь к файлу изображения: ");
+        scanf(" %255s", image_path);
+
+        // Проверяем существует ли файл
+        FILE* file = fopen(image_path, "r");
+        if (file) {
+            fclose(file);
+
+            // Получаем предсказание
+            int prediction = predict_image(network, image_path);
+            if (prediction != -1) {
+                printf("\nПредсказанная цифра: %d\n", prediction);
+            }
+        } else {
+            printf("Ошибка: файл не найден\n");
+        }
+
+        printf("\nХотите проверить еще одно изображение? (y/n): ");
+        scanf(" %c", &choice);
+    }
+
     // Освобождаем память
     free_network(network);
     free(train);
     free(test);
-
     return 0;
 }
 
 void importTrain(char *filepath, int data[TRAIN_LENGTH][LINE_LENGTH]) {
     FILE *file = fopen(filepath, "r");
     if (!file) { fprintf(stderr, "Error opening %s\n", filepath); exit(1); }
-    char buffer[4096];
+    fscanf(file, "%*[^\n]\n"); // Пропускаем заголовок
     int counter = 0;
-    fscanf(file, "%*[^\n]\n");
+    char buffer[4096];
     while (fgets(buffer, sizeof(buffer), file) && counter < TRAIN_LENGTH) {
-        char *token = strtok(buffer, ",");
         int index = 0;
+        char *token = strtok(buffer, ",");
         while (token && index < LINE_LENGTH) {
             data[counter][index++] = atoi(token);
             token = strtok(NULL, ",");
@@ -649,12 +724,12 @@ void importTrain(char *filepath, int data[TRAIN_LENGTH][LINE_LENGTH]) {
 void importTest(char *filepath, int data[TEST_LENGTH][LINE_LENGTH]) {
     FILE *file = fopen(filepath, "r");
     if (!file) { fprintf(stderr, "Error opening %s\n", filepath); exit(1); }
-    char buffer[4096];
+    fscanf(file, "%*[^\n]\n"); // Пропускаем заголовок
     int counter = 0;
-    fscanf(file, "%*[^\n]\n");
+    char buffer[4096];
     while (fgets(buffer, sizeof(buffer), file) && counter < TEST_LENGTH) {
-        char *token = strtok(buffer, ",");
         int index = 0;
+        char *token = strtok(buffer, ",");
         while (token && index < LINE_LENGTH) {
             data[counter][index++] = atoi(token);
             token = strtok(NULL, ",");
@@ -662,4 +737,77 @@ void importTest(char *filepath, int data[TEST_LENGTH][LINE_LENGTH]) {
         counter++;
     }
     fclose(file);
+}
+
+void image_to_binary_vector(const char *image_path, unsigned char *output) {
+    int width, height, channels;
+    unsigned char *image = stbi_load(image_path, &width, &height, &channels, 1);
+    if (!image) {
+        printf("Ошибка загрузки изображения: %s\n", image_path);
+        exit(1);
+    }
+
+    // Изменяем размер изображения до 28x28
+    unsigned char resized_image[TARGET_WIDTH * TARGET_HEIGHT];
+    stbir_resize_uint8(image, width, height, 0, resized_image, TARGET_WIDTH, TARGET_HEIGHT, 0, 1);
+
+    // Инвертируем и нормализуем как в обучающих данных
+    for (int i = 0; i < TARGET_SIZE; i++) {
+        // Инвертируем цвета (чёрная цифра на белом фоне -> белая на чёрном)
+        output[i] = 255 - resized_image[i];
+
+        // Печатаем изображение для отладки
+        if (i % TARGET_WIDTH == 0) printf("\n");
+        printf("%c", output[i] > 128 ? '#' : ' ');
+    }
+    printf("\n");
+
+    stbi_image_free(image);
+}
+
+// Функция для предсказания цифры на изображении
+int predict_image(NeuralNetwork* network, const char* image_path) {
+    // Загрузка и преобразование изображения
+    unsigned char processed_image[TARGET_SIZE];
+    image_to_binary_vector(image_path, processed_image);
+
+    // Нормализуем так же, как обучающие данные - деление на 255.0
+    double inputs[784];
+    for (int i = 0; i < 784; i++) {
+        inputs[i] = processed_image[i] / 255.0;
+    }
+
+    // Прямой проход через сеть
+    double** sums;
+    double** outputs;
+    double* output = network_forward(network, inputs, &sums, &outputs);
+    if (!output) {
+        fprintf(stderr, "Ошибка прямого прохода через сеть\n");
+        return -1;
+    }
+
+    // Находим индекс максимального значения (предсказанный класс)
+    int predicted = 0;
+    for (int j = 1; j < 10; j++) {
+        if (output[j] > output[predicted]) {
+            predicted = j;
+        }
+    }
+
+    // Выводим вероятности для всех классов
+    printf("Вероятности распознавания для каждой цифры:\n");
+    for (int j = 0; j < 10; j++) {
+        printf("  %d: %.2f%%\n", j, output[j] * 100);
+    }
+
+    // Освобождаем память
+    for (int j = 0; j < network->num_layers; j++) {
+        free(sums[j]);
+        free(outputs[j]);
+    }
+    free(sums);
+    free(outputs);
+    free(output);
+
+    return predicted;  // <- ДОБАВЛЕНА ОТСУТСТВУЮЩАЯ СТРОКА!
 }
