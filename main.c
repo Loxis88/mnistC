@@ -12,15 +12,46 @@
 #define NUM_LAYERS 2
 #define HIDDEN_LAYER_SIZE 128
 #define OUTPUT_LAYER_SIZE 10
-#define LEARNING_RATE 0.1
+#define LEARNING_RATE 0.01  // Уменьшено для Adam
 #define EPOCHS 5                // Количество эпох обучения
 #define PROGRESS_INTERVAL 1000   // Интервал отображения прогресса
-#define BATCH_SIZE 1000            // Размер батча для обучения
+#define BATCH_SIZE 32            // Размер батча для обучения
+
+// Параметры Adam оптимизатора
+#define ADAM_BETA1 0.9
+#define ADAM_BETA2 0.999
+#define ADAM_EPSILON 1e-8
 
 #define ALPHA 0.01
 
+// Типы оптимизаторов
+typedef enum {
+    SGD,    // Стохастический градиентный спуск
+    ADAM    // Оптимизатор Adam
+} OptimizerType;
+
+#define OPTIMIZER_TYPE ADAM  // По умолчанию используем Adam
+
 typedef double (*ActivationFunc)(double);
 typedef double (*ActivationDeriv)(double);
+
+// Структура для Adam оптимизатора
+typedef struct {
+    double beta1;
+    double beta2;
+    double epsilon;
+    int t;  // Счетчик шагов
+
+    // Моменты для весов и смещений
+    double*** m_weights;  // Первый момент для весов
+    double*** v_weights;  // Второй момент для весов
+    double** m_biases;    // Первый момент для смещений
+    double** v_biases;    // Второй момент для смещений
+
+    int num_layers;
+    int* layer_sizes;     // Количество нейронов в каждом слое
+    int* input_sizes;     // Количество входов для каждого слоя
+} AdamOptimizer;
 
 typedef struct {
     double *weights;
@@ -40,6 +71,7 @@ typedef struct {
 typedef struct {
     Layer **layers;
     int num_layers;
+    AdamOptimizer* optimizer;  // Добавляем оптимизатор
 } NeuralNetwork;
 
 double sigmoid(double x) { return 1.0 / (1.0 + exp(-x)); }
@@ -111,6 +143,72 @@ void free_layer(Layer* layer) {
     }
 }
 
+// Функция создания оптимизатора Adam
+AdamOptimizer* create_adam_optimizer(NeuralNetwork* network, double beta1, double beta2, double epsilon) {
+    AdamOptimizer* optimizer = (AdamOptimizer*)malloc(sizeof(AdamOptimizer));
+    if (!optimizer) { fprintf(stderr, "Error allocating optimizer\n"); exit(1); }
+
+    optimizer->beta1 = beta1;
+    optimizer->beta2 = beta2;
+    optimizer->epsilon = epsilon;
+    optimizer->t = 0;
+    optimizer->num_layers = network->num_layers;
+
+    optimizer->layer_sizes = (int*)malloc(network->num_layers * sizeof(int));
+    optimizer->input_sizes = (int*)malloc(network->num_layers * sizeof(int));
+
+    // Инициализация массивов моментов
+    optimizer->m_weights = (double***)malloc(network->num_layers * sizeof(double**));
+    optimizer->v_weights = (double***)malloc(network->num_layers * sizeof(double**));
+    optimizer->m_biases = (double**)malloc(network->num_layers * sizeof(double*));
+    optimizer->v_biases = (double**)malloc(network->num_layers * sizeof(double*));
+
+    for (int l = 0; l < network->num_layers; l++) {
+        int num_neurons = network->layers[l]->num_neurons;
+        int num_inputs = network->layers[l]->num_inputs;
+
+        optimizer->layer_sizes[l] = num_neurons;
+        optimizer->input_sizes[l] = num_inputs;
+
+        optimizer->m_biases[l] = (double*)calloc(num_neurons, sizeof(double));
+        optimizer->v_biases[l] = (double*)calloc(num_neurons, sizeof(double));
+
+        optimizer->m_weights[l] = (double**)malloc(num_neurons * sizeof(double*));
+        optimizer->v_weights[l] = (double**)malloc(num_neurons * sizeof(double*));
+
+        for (int i = 0; i < num_neurons; i++) {
+            optimizer->m_weights[l][i] = (double*)calloc(num_inputs, sizeof(double));
+            optimizer->v_weights[l][i] = (double*)calloc(num_inputs, sizeof(double));
+        }
+    }
+
+    return optimizer;
+}
+
+// Функция освобождения оптимизатора
+void free_adam_optimizer(AdamOptimizer* optimizer) {
+    if (!optimizer) return;
+
+    for (int l = 0; l < optimizer->num_layers; l++) {
+        for (int i = 0; i < optimizer->layer_sizes[l]; i++) {
+            free(optimizer->m_weights[l][i]);
+            free(optimizer->v_weights[l][i]);
+        }
+        free(optimizer->m_weights[l]);
+        free(optimizer->v_weights[l]);
+        free(optimizer->m_biases[l]);
+        free(optimizer->v_biases[l]);
+    }
+
+    free(optimizer->m_weights);
+    free(optimizer->v_weights);
+    free(optimizer->m_biases);
+    free(optimizer->v_biases);
+    free(optimizer->layer_sizes);
+    free(optimizer->input_sizes);
+    free(optimizer);
+}
+
 NeuralNetwork* create_network(int* layer_sizes, int num_layers, ActivationFunc* activations, ActivationDeriv* derivs) {
     NeuralNetwork* network = (NeuralNetwork*)malloc(sizeof(NeuralNetwork));
     if (!network) { fprintf(stderr, "Error allocating network\n"); exit(1); }
@@ -122,11 +220,18 @@ NeuralNetwork* create_network(int* layer_sizes, int num_layers, ActivationFunc* 
         int is_softmax = (i == num_layers - 1) ? 1 : 0; // Последний слой использует softmax
         network->layers[i] = create_layer(layer_sizes[i], num_inputs, activations[i], derivs[i], is_softmax);
     }
+
+    // Инициализация Adam оптимизатора
+    network->optimizer = create_adam_optimizer(network, ADAM_BETA1, ADAM_BETA2, ADAM_EPSILON);
+
     return network;
 }
 
 void free_network(NeuralNetwork* network) {
     if (network) {
+        if (network->optimizer) {
+            free_adam_optimizer(network->optimizer);
+        }
         for (int i = 0; i < network->num_layers; i++) { free_layer(network->layers[i]); }
         free(network->layers);
         free(network);
@@ -229,24 +334,72 @@ void network_backward(NeuralNetwork* network, double* inputs, double* targets, d
     free(deltas);
 }
 
-// Новая функция для батчевого обновления весов
-void batch_update(NeuralNetwork* network, double*** weight_gradients, double** bias_gradients, double learning_rate, int batch_size) {
+// Функция обновления весов с Adam
+void adam_update(AdamOptimizer* optimizer, NeuralNetwork* network, double*** weight_gradients, double** bias_gradients, double learning_rate, int batch_size) {
+    optimizer->t += 1;
+    double beta1_t = pow(optimizer->beta1, optimizer->t);
+    double beta2_t = pow(optimizer->beta2, optimizer->t);
+
     for (int l = 0; l < network->num_layers; l++) {
         for (int i = 0; i < network->layers[l]->num_neurons; i++) {
-            // Обновляем bias
-            double bias_update = 0.0;
+            // Обновление bias
+            double bias_grad = 0.0;
             for (int b = 0; b < batch_size; b++) {
-                bias_update += bias_gradients[l][i + b * network->layers[l]->num_neurons];
+                bias_grad += bias_gradients[l][i + b * network->layers[l]->num_neurons];
             }
-            network->layers[l]->neurons[i]->bias -= learning_rate * bias_update / batch_size;
+            bias_grad /= batch_size;
 
-            // Обновляем веса
+            optimizer->m_biases[l][i] = optimizer->beta1 * optimizer->m_biases[l][i] + (1 - optimizer->beta1) * bias_grad;
+            optimizer->v_biases[l][i] = optimizer->beta2 * optimizer->v_biases[l][i] + (1 - optimizer->beta2) * bias_grad * bias_grad;
+
+            double m_hat = optimizer->m_biases[l][i] / (1 - beta1_t);
+            double v_hat = optimizer->v_biases[l][i] / (1 - beta2_t);
+
+            network->layers[l]->neurons[i]->bias -= learning_rate * m_hat / (sqrt(v_hat) + optimizer->epsilon);
+
+            // Обновление весов
             for (int j = 0; j < network->layers[l]->num_inputs; j++) {
-                double weight_update = 0.0;
+                double weight_grad = 0.0;
                 for (int b = 0; b < batch_size; b++) {
-                    weight_update += weight_gradients[l][i + b * network->layers[l]->num_neurons][j];
+                    weight_grad += weight_gradients[l][i + b * network->layers[l]->num_neurons][j];
                 }
-                network->layers[l]->neurons[i]->weights[j] -= learning_rate * weight_update / batch_size;
+                weight_grad /= batch_size;
+
+                optimizer->m_weights[l][i][j] = optimizer->beta1 * optimizer->m_weights[l][i][j] + (1 - optimizer->beta1) * weight_grad;
+                optimizer->v_weights[l][i][j] = optimizer->beta2 * optimizer->v_weights[l][i][j] + (1 - optimizer->beta2) * weight_grad * weight_grad;
+
+                double m_hat = optimizer->m_weights[l][i][j] / (1 - beta1_t);
+                double v_hat = optimizer->v_weights[l][i][j] / (1 - beta2_t);
+
+                network->layers[l]->neurons[i]->weights[j] -= learning_rate * m_hat / (sqrt(v_hat) + optimizer->epsilon);
+            }
+        }
+    }
+}
+
+// Модифицированная функция batch_update для поддержки разных оптимизаторов
+void batch_update(NeuralNetwork* network, double*** weight_gradients, double** bias_gradients, double learning_rate, int batch_size) {
+    if (OPTIMIZER_TYPE == ADAM) {
+        adam_update(network->optimizer, network, weight_gradients, bias_gradients, learning_rate, batch_size);
+    } else {
+        // Стандартный SGD (оригинальный код)
+        for (int l = 0; l < network->num_layers; l++) {
+            for (int i = 0; i < network->layers[l]->num_neurons; i++) {
+                // Обновляем bias
+                double bias_update = 0.0;
+                for (int b = 0; b < batch_size; b++) {
+                    bias_update += bias_gradients[l][i + b * network->layers[l]->num_neurons];
+                }
+                network->layers[l]->neurons[i]->bias -= learning_rate * bias_update / batch_size;
+
+                // Обновляем веса
+                for (int j = 0; j < network->layers[l]->num_inputs; j++) {
+                    double weight_update = 0.0;
+                    for (int b = 0; b < batch_size; b++) {
+                        weight_update += weight_gradients[l][i + b * network->layers[l]->num_neurons][j];
+                    }
+                    network->layers[l]->neurons[i]->weights[j] -= learning_rate * weight_update / batch_size;
+                }
             }
         }
     }
