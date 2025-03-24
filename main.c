@@ -38,10 +38,11 @@
 // Типы оптимизаторов
 typedef enum {
     SGD,    // Стохастический градиентный спуск
-    ADAM    // Оптимизатор Adam
+    ADAM,   // Оптимизатор Adam
+    DYNAMIC_SGD // Динамический градиентный спуск
 } OptimizerType;
 
-#define OPTIMIZER_TYPE ADAM  // По умолчанию используем Adam
+#define OPTIMIZER_TYPE DYNAMIC_SGD  // Используем новый метод
 
 typedef double (*ActivationFunc)(double);
 typedef double (*ActivationDeriv)(double);
@@ -519,6 +520,13 @@ void shuffle_data(int data[TRAIN_LENGTH][LINE_LENGTH]) {
     }
 }
 
+// Функция для вычисления динамического размера батча
+int calculate_dynamic_batch_size(int epoch, int total_epochs, int total_samples) {
+    // Линейная интерполяция от 1 до total_samples в зависимости от эпохи
+    if (epoch >= total_epochs - 1) return total_samples;
+    return 1 + (int)((total_samples - 1) * (double)epoch / (total_epochs - 1));
+}
+
 void importTrain(char*, int [TRAIN_LENGTH][LINE_LENGTH]);
 void importTest(char*, int [TEST_LENGTH][LINE_LENGTH]);
 int predict_image(NeuralNetwork* network, const char* image_path);
@@ -555,31 +563,38 @@ int main() {
 
         // Адаптивный learning rate
         double current_lr = LEARNING_RATE / (1.0 + 0.05 * epoch);
-        printf("  Текущий learning rate: %.6f\n", current_lr);
+        
+        // Вычисляем динамический размер батча для текущей эпохи
+        int current_batch_size = BATCH_SIZE;
+        if (OPTIMIZER_TYPE == DYNAMIC_SGD) {
+            current_batch_size = calculate_dynamic_batch_size(epoch, EPOCHS, TRAIN_LENGTH);
+        }
+        
+        printf("  Текущий learning rate: %.6f, размер батча: %d\n", current_lr, current_batch_size);
 
         // Подготовка структур для хранения градиентов
         double*** weight_gradients = (double***)malloc(network->num_layers * sizeof(double**));
         double** bias_gradients = (double**)malloc(network->num_layers * sizeof(double*));
 
         for (int l = 0; l < network->num_layers; l++) {
-            bias_gradients[l] = (double*)calloc(network->layers[l]->num_neurons * BATCH_SIZE, sizeof(double));
-            weight_gradients[l] = (double**)malloc(network->layers[l]->num_neurons * BATCH_SIZE * sizeof(double*));
-            for (int i = 0; i < network->layers[l]->num_neurons * BATCH_SIZE; i++) {
+            bias_gradients[l] = (double*)calloc(network->layers[l]->num_neurons * current_batch_size, sizeof(double));
+            weight_gradients[l] = (double**)malloc(network->layers[l]->num_neurons * current_batch_size * sizeof(double*));
+            for (int i = 0; i < network->layers[l]->num_neurons * current_batch_size; i++) {
                 weight_gradients[l][i] = (double*)calloc(network->layers[l]->num_inputs, sizeof(double));
             }
         }
 
         // Проходим по всем обучающим примерам батчами
-        int num_batches = (TRAIN_LENGTH + BATCH_SIZE - 1) / BATCH_SIZE; // Округление вверх
+        int num_batches = (TRAIN_LENGTH + current_batch_size - 1) / current_batch_size; // Округление вверх
 
         for (int batch = 0; batch < num_batches; batch++) {
-            int batch_start = batch * BATCH_SIZE;
-            int batch_end = batch_start + BATCH_SIZE;
+            int batch_start = batch * current_batch_size;
+            int batch_end = batch_start + current_batch_size;
             if (batch_end > TRAIN_LENGTH) batch_end = TRAIN_LENGTH;
-            int current_batch_size = batch_end - batch_start;
+            int actual_batch_size = batch_end - batch_start;
 
             // Обработка примеров в батче
-            for (int i = 0; i < current_batch_size; i++) {
+            for (int i = 0; i < actual_batch_size; i++) {
                 int sample_idx = batch_start + i;
 
                 // Подготовка входных данных
@@ -615,28 +630,28 @@ int main() {
             }
 
             // Обновляем веса после обработки всего батча
-            batch_update(network, weight_gradients, bias_gradients, current_lr, current_batch_size);
+            batch_update(network, weight_gradients, bias_gradients, current_lr, actual_batch_size);
 
             // Обнуляем градиенты для следующего батча
             for (int l = 0; l < network->num_layers; l++) {
-                memset(bias_gradients[l], 0, network->layers[l]->num_neurons * BATCH_SIZE * sizeof(double));
-                for (int i = 0; i < network->layers[l]->num_neurons * BATCH_SIZE; i++) {
+                memset(bias_gradients[l], 0, network->layers[l]->num_neurons * current_batch_size * sizeof(double));
+                for (int i = 0; i < network->layers[l]->num_neurons * current_batch_size; i++) {
                     memset(weight_gradients[l][i], 0, network->layers[l]->num_inputs * sizeof(double));
                 }
             }
 
             // Показываем прогресс
-            if ((batch + 1) % (PROGRESS_INTERVAL / BATCH_SIZE + 1) == 0) {
+            if ((batch + 1) % (PROGRESS_INTERVAL / current_batch_size + 1) == 0) {
                 printf("  Обработано: %d/%d примеров (%.2f%%)\n",
-                       (batch + 1) * BATCH_SIZE > TRAIN_LENGTH ? TRAIN_LENGTH : (batch + 1) * BATCH_SIZE,
+                       (batch + 1) * current_batch_size > TRAIN_LENGTH ? TRAIN_LENGTH : (batch + 1) * current_batch_size,
                        TRAIN_LENGTH,
-                       ((batch + 1) * BATCH_SIZE > TRAIN_LENGTH ? TRAIN_LENGTH : (batch + 1) * BATCH_SIZE) * 100.0 / TRAIN_LENGTH);
+                       ((batch + 1) * current_batch_size > TRAIN_LENGTH ? TRAIN_LENGTH : (batch + 1) * current_batch_size) * 100.0 / TRAIN_LENGTH);
             }
         }
 
         // Освобождаем память градиентов
         for (int l = 0; l < network->num_layers; l++) {
-            for (int i = 0; i < network->layers[l]->num_neurons * BATCH_SIZE; i++) {
+            for (int i = 0; i < network->layers[l]->num_neurons * current_batch_size; i++) {
                 free(weight_gradients[l][i]);
             }
             free(weight_gradients[l]);
