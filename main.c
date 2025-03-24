@@ -522,9 +522,10 @@ void shuffle_data(int data[TRAIN_LENGTH][LINE_LENGTH]) {
 
 // Функция для вычисления динамического размера батча
 int calculate_dynamic_batch_size(int epoch, int total_epochs, int total_samples) {
-    // Линейная интерполяция от 1 до total_samples в зависимости от эпохи
-    if (epoch >= total_epochs - 1) return total_samples;
-    return 1 + (int)((total_samples - 1) * (double)epoch / (total_epochs - 1));
+    // Линейная интерполяция от 1 до MAX_BATCH_SIZE (6000) в зависимости от эпохи
+    const int MAX_BATCH_SIZE = 6000;
+    if (epoch >= total_epochs - 1) return MAX_BATCH_SIZE;
+    return 1 + (int)((MAX_BATCH_SIZE - 1) * (double)epoch / (total_epochs - 1));
 }
 
 void importTrain(char*, int [TRAIN_LENGTH][LINE_LENGTH]);
