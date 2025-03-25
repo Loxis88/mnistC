@@ -19,40 +19,39 @@
 #define TRAIN_LENGTH 60000
 #define TEST_LENGTH 10000
 
-// Гиперпараметры нейронной сети
 #define NUM_LAYERS 2
-#define HIDDEN_LAYER_SIZE 64
+#define HIDDEN_LAYER_SIZE 256
 #define OUTPUT_LAYER_SIZE 10
-#define LEARNING_RATE 0.01  // Уменьшено для Adam
-#define EPOCHS 5                // Количество эпох обучения
-#define PROGRESS_INTERVAL 1000   // Интервал отображения прогресса
-#define BATCH_SIZE 16            // Размер батча для обучения
+#define LEARNING_RATE 0.1
+#define EPOCHS 5
+#define PROGRESS_INTERVAL 1000
+#define BATCH_SIZE 16
 
-// Параметры Adam оптимизатора
+
 #define ADAM_BETA1 0.9
 #define ADAM_BETA2 0.999
 #define ADAM_EPSILON 1e-8
 
 #define ALPHA 0.01
 
-// Типы оптимизаторов
+
 typedef enum {
-    SGD,    // Стохастический градиентный спуск
-    ADAM,   // Оптимизатор Adam
-    DYNAMIC_SGD // Динамический градиентный спуск
+    SGD,
+    ADAM
 } OptimizerType;
 
-#define OPTIMIZER_TYPE DYNAMIC_SGD  // Используем новый метод
+
+OptimizerType optimizerType = SGD;
 
 typedef double (*ActivationFunc)(double);
 typedef double (*ActivationDeriv)(double);
 
-// Структура для Adam оптимизатора
+
 typedef struct {
     double beta1;
     double beta2;
     double epsilon;
-    int t;  // Счетчик шагов
+    int t;
 
     // Моменты для весов и смещений
     double*** m_weights;  // Первый момент для весов
@@ -71,7 +70,7 @@ typedef struct {
     int num_inputs;
     ActivationFunc activation;
     ActivationDeriv deriv;
-    int is_softmax; // Флаг для обозначения нейронов в softmax-слое
+    int is_softmax;
 } Neuron;
 
 typedef struct {
@@ -103,7 +102,7 @@ void softmax_layer(double* inputs, double* outputs, int n) {
 
     double sum = 0.0;
     for (int i = 0; i < n; i++) {
-        outputs[i] = exp(inputs[i] - max_val); // Вычитаем максимум для численной стабильности
+        outputs[i] = exp(inputs[i] - max_val);
         sum += outputs[i];
     }
 
@@ -229,11 +228,10 @@ NeuralNetwork* create_network(int* layer_sizes, int num_layers, ActivationFunc* 
     network->num_layers = num_layers;
     for (int i = 0; i < num_layers; i++) {
         int num_inputs = (i == 0) ? LINE_LENGTH - 1 : layer_sizes[i - 1];
-        int is_softmax = (i == num_layers - 1) ? 1 : 0; // Последний слой использует softmax
+        int is_softmax = (i == num_layers - 1) ? 1 : 0;
         network->layers[i] = create_layer(layer_sizes[i], num_inputs, activations[i], derivs[i], is_softmax);
     }
 
-    // Инициализация Adam оптимизатора
     network->optimizer = create_adam_optimizer(network, ADAM_BETA1, ADAM_BETA2, ADAM_EPSILON);
 
     return network;
@@ -255,7 +253,7 @@ double* layer_forward(Layer* layer, double* inputs, double* sums) {
     double* outputs = (double*)malloc(layer->num_neurons * sizeof(double));
     if (!outputs) { fprintf(stderr, "Error allocating layer outputs\n"); return NULL; }
 
-    // Вычисляем суммы для всех нейронов
+
     for (int i = 0; i < layer->num_neurons; i++) {
         sums[i] = layer->neurons[i]->bias;
         for (int j = 0; j < layer->num_inputs; j++) {
@@ -263,11 +261,10 @@ double* layer_forward(Layer* layer, double* inputs, double* sums) {
         }
     }
 
-    // Если слой использует softmax, применяем его ко всему слою
+
     if (layer->neurons[0]->is_softmax) {
         softmax_layer(sums, outputs, layer->num_neurons);
     } else {
-        // Для других слоев применяем активацию индивидуально к каждому нейрону
         for (int i = 0; i < layer->num_neurons; i++) {
             outputs[i] = layer->neurons[i]->activation(sums[i]);
         }
@@ -287,8 +284,6 @@ double* network_forward(NeuralNetwork* network, double* inputs, double*** sums, 
         (*outputs)[i] = layer_forward(network->layers[i], current_inputs, (*sums)[i]);
         if (!(*outputs)[i]) { fprintf(stderr, "Layer %d forward failed\n", i); return NULL; }
 
-        // Удаляем освобождение current_inputs, чтобы избежать двойного освобождения
-        // Оно будет освобождено в main вместе с outputs
         current_inputs = (*outputs)[i];
     }
 
@@ -312,10 +307,8 @@ void network_backward(NeuralNetwork* network, double* inputs, double* targets, d
         if (!deltas[l]) { fprintf(stderr, "Error allocating deltas[%d]\n", l); return; }
 
         if (l == network->num_layers - 1) {
-            // Для выходного слоя с softmax используем прямое вычисление градиента для кросс-энтропии
             if (network->layers[l]->neurons[0]->is_softmax) {
                 for (int i = 0; i < network->layers[l]->num_neurons; i++) {
-                    // Градиент для softmax с кросс-энтропией: output[i] - target[i]
                     deltas[l][i] = outputs[l][i] - targets[i];
                 }
             } else {
@@ -389,22 +382,19 @@ void adam_update(AdamOptimizer* optimizer, NeuralNetwork* network, double*** wei
     }
 }
 
-// Модифицированная функция batch_update для поддержки разных оптимизаторов
+
 void batch_update(NeuralNetwork* network, double*** weight_gradients, double** bias_gradients, double learning_rate, int batch_size) {
-    if (OPTIMIZER_TYPE == ADAM) {
+    if (optimizerType == ADAM) {
         adam_update(network->optimizer, network, weight_gradients, bias_gradients, learning_rate, batch_size);
     } else {
-        // Стандартный SGD (оригинальный код)
         for (int l = 0; l < network->num_layers; l++) {
             for (int i = 0; i < network->layers[l]->num_neurons; i++) {
-                // Обновляем bias
                 double bias_update = 0.0;
                 for (int b = 0; b < batch_size; b++) {
                     bias_update += bias_gradients[l][i + b * network->layers[l]->num_neurons];
                 }
                 network->layers[l]->neurons[i]->bias -= learning_rate * bias_update / batch_size;
 
-                // Обновляем веса
                 for (int j = 0; j < network->layers[l]->num_inputs; j++) {
                     double weight_update = 0.0;
                     for (int b = 0; b < batch_size; b++) {
@@ -520,20 +510,11 @@ void shuffle_data(int data[TRAIN_LENGTH][LINE_LENGTH]) {
     }
 }
 
-// Функция для вычисления динамического размера батча
-int calculate_dynamic_batch_size(int epoch, int total_epochs, int total_samples) {
-    // Линейная интерполяция от 1 до MAX_BATCH_SIZE (6000) в зависимости от эпохи
-    const int MAX_BATCH_SIZE = 6000;
-    if (epoch >= total_epochs - 1) return MAX_BATCH_SIZE;
-    return 1 + (int)((MAX_BATCH_SIZE - 1) * (double)epoch / (total_epochs - 1));
-}
-
 void importTrain(char*, int [TRAIN_LENGTH][LINE_LENGTH]);
 void importTest(char*, int [TEST_LENGTH][LINE_LENGTH]);
 int predict_image(NeuralNetwork* network, const char* image_path);
 
 int main() {
-    // Инициализация генератора случайных чисел
     srand(time(NULL));
 
     int (*train)[LINE_LENGTH] = malloc(TRAIN_LENGTH * sizeof(*train));
@@ -543,37 +524,46 @@ int main() {
     importTrain("mnist/mnist_train.csv", train);
     importTest("mnist/mnist_test.csv", test);
 
-    int layer_sizes[] = {HIDDEN_LAYER_SIZE,HIDDEN_LAYER_SIZE, OUTPUT_LAYER_SIZE};
-    ActivationFunc activations[] = {lrelu,lrelu, identity}; // identity для выходного слоя с softmax
-    ActivationDeriv derivs[] = {lrelu_deriv,lrelu_deriv, identity_deriv};
+    int layer_sizes[] = {HIDDEN_LAYER_SIZE, OUTPUT_LAYER_SIZE};
+    ActivationFunc activations[] = {lrelu, identity};
+    ActivationDeriv derivs[] = {lrelu_deriv, identity_deriv};
     NeuralNetwork* network = create_network(layer_sizes, NUM_LAYERS, activations, derivs);
+
+    char optimizerChoice;
+    printf("Выберите оптимизатор:\n");
+    printf("1. Стохастический градиентный спуск (SGD)\n");
+    printf("2. Adam\n");
+    printf("Введите номер (1 или 2): ");
+    scanf(" %c", &optimizerChoice);
+
+    if (optimizerChoice == '2') {
+        optimizerType = ADAM;
+        printf("Выбран оптимизатор Adam\n");
+    } else {
+        optimizerType = SGD;
+        printf("Выбран оптимизатор SGD\n");
+    }
 
     printf("Начало обучения: %d эпох, %d примеров, размер батча: %d\n", EPOCHS, TRAIN_LENGTH, BATCH_SIZE);
 
-    // Переменные для раннего останова
+
     double best_accuracy = 0.0;
     int epochs_without_improvement = 0;
-    const int patience = 2; // Количество эпох без улучшения для early stopping
+    const int patience = 2;
 
-    // Обучение по эпохам
+
     for (int epoch = 0; epoch < EPOCHS; epoch++) {
         printf("Эпоха %d/%d\n", epoch + 1, EPOCHS);
 
-        // Перемешиваем обучающую выборку перед каждой эпохой
         shuffle_data(train);
 
-        // Адаптивный learning rate
         double current_lr = LEARNING_RATE / (1.0 + 0.05 * epoch);
-        
-        // Вычисляем динамический размер батча для текущей эпохи
+
         int current_batch_size = BATCH_SIZE;
-        if (OPTIMIZER_TYPE == DYNAMIC_SGD) {
-            current_batch_size = calculate_dynamic_batch_size(epoch, EPOCHS, TRAIN_LENGTH);
-        }
-        
+
         printf("  Текущий learning rate: %.6f, размер батча: %d\n", current_lr, current_batch_size);
 
-        // Подготовка структур для хранения градиентов
+
         double*** weight_gradients = (double***)malloc(network->num_layers * sizeof(double**));
         double** bias_gradients = (double**)malloc(network->num_layers * sizeof(double*));
 
@@ -585,8 +575,7 @@ int main() {
             }
         }
 
-        // Проходим по всем обучающим примерам батчами
-        int num_batches = (TRAIN_LENGTH + current_batch_size - 1) / current_batch_size; // Округление вверх
+        int num_batches = (TRAIN_LENGTH + current_batch_size - 1) / current_batch_size;
 
         for (int batch = 0; batch < num_batches; batch++) {
             int batch_start = batch * current_batch_size;
@@ -825,5 +814,5 @@ int predict_image(NeuralNetwork* network, const char* image_path) {
     free(outputs);
     free(output);
 
-    return predicted;  // <- ДОБАВЛЕНА ОТСУТСТВУЮЩАЯ СТРОКА!
+    return predicted;
 }
